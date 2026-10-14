@@ -1,0 +1,86 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "uniurdf"
+version = "0.1.0"
+description = "Align robot URDFs onto a shared coordinate convention."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "Horizon Robotics" }]
+keywords = ["urdf", "robotics", "kinematics", "alignment"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering",
+]
+dependencies = ["numpy", "PyYAML"]
+
+[project.optional-dependencies]
+gui = ["flask", "gevent"]
+
+[project.scripts]
+uniurdf = "uniurdf.cli:main"
+
+[dependency-groups]
+# pip builds in a throwaway environment, so the `hatchling` above never lands
+# in the venv `make wheel` imports it from.
+dev = ["pytest", "pytest-cov", "ruff", "pyright", "hatchling"]
+# Three tests check the joint indices in inventory.json against the positions
+# `pytorch_kinematics` reports for the same URDF. It installs PyTorch, which
+# this package runs without; those tests skip when it is absent.
+crosscheck = ["pytorch_kinematics"]
+
+[tool.hatch.build.targets.wheel]
+# Non-Python files under the package (example/, gui/static/) ship with it.
+# They are located relative to their module at run time, so every one must be
+# present or the installed package fails where a checkout would have worked.
+packages = ["src/uniurdf"]
+# Ignored files are excluded from the wheel by default, which would leave the
+# vendored three.js out and the installed viewer blank. Building without
+# running scripts/fetch_vendor.py first still produces an assetless wheel;
+# `make wheel` is what catches that.
+artifacts = [
+  "src/uniurdf/gui/static/vendor/*.js",
+  "src/uniurdf/gui/static/loaders/*.js",
+  "src/uniurdf/gui/static/utils/*.js",
+]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/uniurdf", "tests", "README.md", "LICENSE", "pyproject.toml"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py310"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "TID", "D", "Q", "W", "N", "UP"]
+ignore = [
+  "D100", # module docstrings are enforced by review, not by lint
+  "D104", # package __init__ docstrings likewise
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["D101", "D102", "D103"]
+
+[tool.pyright]
+include = ["src", "tests"]
+pythonVersion = "3.10"
+typeCheckingMode = "basic"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers"

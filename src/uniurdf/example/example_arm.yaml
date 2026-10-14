@@ -1,0 +1,72 @@
+# A complete, runnable spec for the robot shipped beside it.
+#
+#   uniurdf align src/uniurdf/example/example_arm.yaml --output /tmp/example
+#
+# example_arm.urdf is built from primitive geometry, so it needs no mesh
+# files and this spec runs anywhere the package is installed. Use it to see
+# what the tool does before pointing it at a real robot.
+#
+# Every field is documented here. Relative paths resolve from the directory
+# containing this file, never from the working directory, so a run gives the
+# same result from anywhere and a spec moves with the tree it names. The
+# `--output` flag is the exception: it is a run-time choice, so it resolves
+# from the CWD.
+
+# (required) The URDF to align.
+source_urdf: example_arm.urdf
+
+# (optional) Base directory that mesh references resolve against.
+#   - Relative ref           ->  mesh_root / ref
+#   - package://<pkg>/<rel>  ->  mesh_root / <pkg> / <rel>
+# Default: the directory containing source_urdf. This robot has no meshes,
+# so it does not apply here.
+#
+# mesh_root: meshes
+
+# (optional) Where to write the aligned URDF and copied mesh tree.
+# Default: workspace/aligned_urdf/<source_urdf stem> beside this file.
+#
+# output: ../../../workspace/aligned_urdf/example_arm
+
+# One inner list per arm, each naming the movable joints from root to tip.
+# This groups the viewer's sliders and picks which frames get labelled.
+# `<stem>.urdf` aligns every actuated joint whether or not it is listed;
+# `<stem>.pruned.urdf` keeps only these joints' links, plus their ancestors.
+# Omit to treat all movable joints as a single chain.
+chains:
+  - [left_shoulder, left_elbow]
+  - [right_shoulder, right_elbow]
+
+# Positionally paired with `chains`; use `null` for an arm that needs no
+# tool centre point. Each entry adds a fixed child link `<base_link>_tcp`.
+# `base_link` must already exist and is never renamed.
+#
+#   xyz -- offset from base_link, in METRES
+#   rpy -- orientation relative to base_link, in DEGREES
+tcp:
+  - base_link: left_wrist
+    xyz: [0.05, 0.0, 0.0]
+    rpy: [0.0, 0.0, 0.0]
+  - base_link: right_wrist
+    xyz: [0.05, 0.0, 0.0]
+    rpy: [0.0, 90.0, 0.0]
+
+# Links whose world pose must survive axis normalisation. A compatibility
+# link `<link>_camera_mount_compat` is added as a fixed child, so calibrated
+# extrinsics that point at the original link stay valid.
+#
+# A compat link appears only where alignment actually rotated the frame.
+# `left_forearm` sits below a joint that gets normalised, so it gets one;
+# `head_camera` hangs off fixed joints and never moves, so it does not.
+camera_references:
+  - link: head_camera
+  - link: left_forearm
+
+# (optional) Extra rotation about a joint's own +Z, applied after
+# normalisation, in DEGREES. Alignment fixes the axis direction but leaves
+# the roll about that axis free; set it where a robot needs a particular
+# roll. The applied angles are recorded in the output so re-running the tool
+# on its own result does not apply them twice.
+#
+# rot_z:
+#   left_elbow: 90.0

@@ -1,0 +1,1927 @@
+<!DOCTYPE html>
+<!--
+  Project uniurdf
+  Copyright (c) 2024-2026 Horizon Robotics. All Rights Reserved.
+  Licensed under the Apache License, Version 2.0.
+
+  three.js and its loaders are vendored under static/vendor/ (MIT). Nothing is
+  fetched from a CDN at runtime, so the viewer works offline.
+
+  Forward kinematics runs on the server, in the same numpy code that produces
+  the exported URDF. This file draws what comes back; it never computes a
+  transform of its own.
+
+  Three-stage workspace:
+    Stage 1 (source)  -- on load: staged source robot, frames + meshes +
+                         diagnostics. No alignment has run.
+    Stage 2 (aligned) -- after "Run alignment": scene swaps to aligned robot,
+                         before/after toggle enabled, delta table shown.
+    Stale              -- spec edited after aligning: aligned view kept but
+                         badged stale until "Run alignment" is pressed again.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>uniurdf</title>
+<style>
+  :root {
+    --bg: #14171c; --panel: #1c2027; --line: #2c323c;
+    --text: #e6e9ef; --muted: #98a2b3; --accent: #4f9cf9;
+    --ok: #38b26a; --warn: #e0a33e; --err: #e5484d;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; height: 100vh; display: grid;
+    grid-template-columns: 320px 1fr 320px;
+    grid-template-rows: 1fr auto auto;
+    font: 13px/1.5 ui-sans-serif, system-ui, -apple-system, sans-serif;
+    background: var(--bg); color: var(--text); overflow: hidden;
+  }
+  aside { background: var(--panel); overflow-y: auto; padding: 14px; }
+  aside.left { border-right: 1px solid var(--line); }
+  aside.right { border-left: 1px solid var(--line); }
+  main { position: relative; }
+  canvas { display: block; width: 100%; height: 100%; }
+  h1 { font-size: 15px; margin: 0 0 2px; }
+  h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--muted); margin: 18px 0 8px; font-weight: 600;
+  }
+  h2:first-of-type { margin-top: 10px; }
+  .sub { color: var(--muted); font-size: 11px; word-break: break-all; }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+  .row label { flex: 1; min-width: 0; overflow: hidden;
+                text-overflow: ellipsis; white-space: nowrap; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .track { display: flex; align-items: center; gap: 6px; }
+  .track input[type=range] { flex: 1; min-width: 0; }
+  .bound {
+    color: var(--muted); font-size: 10px; font-variant-numeric: tabular-nums;
+    flex: 0 0 auto; min-width: 34px; text-align: center;
+  }
+  /* A continuous joint has no real limit; the shown range is display-only. */
+  .bound.soft { opacity: .55; font-style: italic; }
+  input[type=number], input[type=text], select {
+    background: #12151a; color: var(--text); border: 1px solid var(--line);
+    border-radius: 4px; padding: 4px 6px; font: inherit; width: 100%;
+  }
+  input[type=number] { width: 72px; }
+  button {
+    background: var(--accent); color: #fff; border: 0; border-radius: 5px;
+    padding: 7px 12px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button.ghost {
+    background: transparent; border: 1px solid var(--line);
+    color: var(--text); font-weight: 400;
+  }
+  button:hover { filter: brightness(1.1); }
+  button:disabled { opacity: .45; cursor: default; filter: none; }
+  /* Highlight the Run button when aligned result is stale. */
+  button.stale-run {
+    background: var(--warn); color: #000;
+  }
+  .chain-group {
+    border-left: 2px solid var(--accent); padding-left: 8px;
+    margin-bottom: 14px;
+  }
+  /* Joint chips inside a chain: small removable badges. */
+  .chip-row { display: flex; flex-wrap: wrap; gap: 4px; margin: 4px 0 6px; }
+  .chip {
+    display: flex; align-items: center; gap: 3px;
+    background: #12151a; border: 1px solid var(--line); border-radius: 4px;
+    padding: 2px 5px; font-size: 11px; font-family: ui-monospace, monospace;
+  }
+  .chip button {
+    background: none; border: 0; color: var(--muted);
+    padding: 0; font: inherit; font-size: 11px;
+    cursor: pointer; line-height: 1;
+  }
+  .chip button:hover { color: var(--err); filter: none; }
+  /* Controls to add a joint to a chain. */
+  .chain-add { display: flex; gap: 4px; margin-top: 2px; }
+  .chain-add select { flex: 1; }
+  .chain-add button { padding: 3px 8px; font-size: 11px; }
+  .val { color: var(--muted); font-variant-numeric: tabular-nums;
+         min-width: 46px; text-align: right; }
+  .tcp { border: 1px solid var(--line); border-radius: 6px; padding: 8px;
+         margin-bottom: 8px; }
+  .tcp .vec { display: flex; gap: 4px; margin-top: 4px; }
+  .tcp .vec input { width: 100%; }
+  .msg { padding: 8px; border-radius: 5px; margin-bottom: 8px;
+         font-size: 12px; }
+  .msg.ok { background: #14361f; color: #8fe0ab; }
+  .msg.warn { background: #3a2f14; color: #f0cd8a; }
+  .msg.err { background: #3a1a1c; color: #f4a1a4; }
+  .diag { padding: 5px 8px; border-radius: 4px; margin-bottom: 4px;
+          font-size: 11px; }
+  .diag.fatal { background: #3a1a1c; color: #f4a1a4; }
+  .diag.error { background: #3a1a1c; color: #f4a1a4; }
+  .diag.warning { background: #3a2f14; color: #f0cd8a; }
+  .diag.info { background: #13151a; color: var(--muted); }
+  /* YAML preview block: read-only, scrollable, monospaced. */
+  #yaml-preview {
+    background: #0d0f13; border: 1px solid var(--line); border-radius: 4px;
+    padding: 8px; font: 11px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace;
+    white-space: pre; overflow-x: auto; color: var(--muted);
+    max-height: 200px; overflow-y: auto; user-select: text;
+    cursor: text; margin-bottom: 10px;
+  }
+  /* Three action buttons, full-width, stacked. */
+  .action-buttons { display: flex; flex-direction: column; gap: 6px;
+                    margin-top: 2px; }
+  .action-buttons button { width: 100%; }
+  /* Stale badge that appears beside the robot name after spec edits. */
+  #stale-badge {
+    background: var(--warn); color: #000;
+    font-size: 10px; font-weight: 700; border-radius: 3px;
+    padding: 1px 5px; vertical-align: middle; margin-left: 6px;
+  }
+  /* Before/after toggle bar (shown only after first alignment). */
+  #stage-toggle-bar {
+    position: absolute; left: 50%; top: 12px;
+    transform: translateX(-50%); z-index: 10;
+  }
+  #stage-toggle-bar .viewbar { position: static; }
+  /* Delta table. */
+  #delta-panel {
+    margin-top: 10px;
+  }
+  #delta-table-wrap {
+    overflow-x: auto; max-height: 340px; overflow-y: auto;
+    border: 1px solid var(--line); border-radius: 4px;
+  }
+  table {
+    border-collapse: collapse; width: 100%; font-size: 11px;
+    font-variant-numeric: tabular-nums;
+  }
+  th {
+    background: #12151a; text-align: left; padding: 4px 7px;
+    border-bottom: 1px solid var(--line); position: sticky; top: 0; z-index: 1;
+    color: var(--muted); white-space: nowrap;
+  }
+  td {
+    padding: 3px 7px; border-bottom: 1px solid #1a1e25;
+    font-family: ui-monospace, monospace; white-space: nowrap;
+  }
+  tr:last-child td { border-bottom: 0; }
+  /* Rotation delta > 0.01 deg is interesting (frame rotated by alignment). */
+  td.rotated { color: var(--accent); font-weight: 600; }
+  .legend {
+    position: absolute; left: 12px; bottom: 12px; font-size: 11px;
+    color: var(--muted); background: rgba(20,23,28,.8); padding: 6px 9px;
+    border-radius: 5px;
+  }
+  .legend b { font-weight: 600; }
+  .x { color: #e5484d; } .y { color: #38b26a; } .z { color: #4f9cf9; }
+  #status {
+    position: absolute; right: 12px; top: 12px; font-size: 11px;
+    color: var(--muted);
+  }
+  .viewbar {
+    position: absolute; left: 12px; top: 12px; display: flex; gap: 6px;
+  }
+  .viewbar button {
+    background: rgba(20,23,28,.85); padding: 4px 10px; font-size: 11px;
+  }
+  #log {
+    border-top: 1px solid var(--line); background: #12151a;
+    max-height: 34vh; overflow-y: auto; font-size: 11px;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  #log .entry {
+    padding: 4px 8px; border-bottom: 1px solid #1a1e25;
+    display: flex; gap: 6px; align-items: baseline;
+  }
+  #log .entry:last-child { border-bottom: 0; }
+  #log .t { color: #667085; flex: 0 0 auto; }
+  #log .m { word-break: break-word; }
+  #log .info .m { color: var(--text); }
+  #log .ok .m   { color: #8fe0ab; }
+  #log .warn .m { color: #f0cd8a; }
+  #log .err .m  { color: #f4a1a4; }
+  .logbar {
+    display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+    border-top: 1px solid var(--line); background: var(--panel);
+  }
+  .logbar h2 { margin: 0; }
+  .logbar .count { color: var(--muted); font-size: 11px; }
+  .logbar button { padding: 3px 8px; font-size: 11px; }
+</style>
+<script type="importmap">
+{ "imports": {
+    "three": "/static/vendor/three.module.min.js",
+    "three/addons/": "/static/vendor/"
+} }
+</script>
+</head>
+<body>
+
+<!-- ============================================================ LEFT PANEL
+     Spec editor: chains, tcp, camera_references, YAML preview, action buttons.
+     This is the authoring panel — the user edits here and presses "Run alignment"
+     to apply.
+-->
+<aside class="left">
+  <h1 id="robot-name">loading…</h1>
+  <span id="stale-badge" style="display:none">STALE</span>
+  <div class="sub" id="robot-path"></div>
+  <div id="model-warnings"></div>
+
+  <h2>Diagnostics</h2>
+  <div id="diagnostics-list"><div class="sub">loading…</div></div>
+
+  <h2>Chains</h2>
+  <div class="sub" style="margin-bottom:6px">
+    Joints per arm. Each joint chip can be removed; the selector below adds one.
+  </div>
+  <div id="chain-list"></div>
+  <button class="ghost" id="add-chain" style="width:100%; margin-bottom:6px">
+    + add chain
+  </button>
+
+  <h2>TCP (tool centre points)</h2>
+  <div id="tcp-list"></div>
+
+  <h2>Camera references</h2>
+  <div class="sub" style="margin-bottom:6px">
+    Links whose frame must survive axis normalisation.
+  </div>
+  <div id="camera-list"></div>
+  <button class="ghost" id="add-camera" style="width:100%; margin-bottom:6px">
+    + add camera reference
+  </button>
+
+  <h2>Spec preview</h2>
+  <div class="sub" style="margin-bottom:6px">Read-only. Edit paths in the file.</div>
+  <div id="yaml-preview"></div>
+
+  <div class="action-buttons">
+    <button id="btn-run-align">Run alignment</button>
+    <button class="ghost" id="btn-export-config">Export config</button>
+    <button class="ghost" id="btn-export-urdf">Export URDF</button>
+  </div>
+  <div id="action-result"></div>
+</aside>
+
+<!-- ============================================================ SCENE -->
+<main>
+  <canvas id="view"></canvas>
+  <div id="status"></div>
+  <!-- Before/after toggle: only shown after alignment has run. -->
+  <div id="stage-toggle-bar" style="display:none">
+    <div class="viewbar" style="position:static">
+      <button class="ghost" id="btn-show-source">source</button>
+      <button class="ghost" id="btn-show-aligned">aligned</button>
+    </div>
+  </div>
+  <div class="legend">
+    <b class="x">X</b> <b class="y">Y</b> <b class="z">Z</b> ·
+    drag rotate · scroll zoom · right-drag pan · <b>F</b> fit · <b>R</b> reset
+  </div>
+  <div class="viewbar">
+    <button class="ghost" id="view-fit" title="frame the whole robot">
+      fit
+    </button>
+    <button class="ghost" id="view-reset" title="back to the opening view">
+      reset
+    </button>
+  </div>
+</main>
+
+<!-- ============================================================ RIGHT PANEL
+     Joint sliders (grouped per chain), display toggles, export name.
+     Delta table: shown after alignment; explains what alignment changed.
+-->
+<aside class="right">
+  <h2>Joints</h2>
+  <div class="row">
+    <button class="ghost" id="zero-all">zero</button>
+    <button class="ghost" id="sweep-all">sweep</button>
+    <label class="row" style="margin:0 0 0 auto; gap:4px">
+      <input type="checkbox" id="show-meshes" checked style="width:auto">
+      meshes
+    </label>
+  </div>
+  <div class="row">
+    <label class="row" style="margin:0; gap:4px; flex:0 0 auto">
+      <input type="checkbox" id="show-labels" checked style="width:auto">
+      labels
+    </label>
+    <input type="range" id="label-size" min="6" max="28" step="1" value="12"
+           title="label font size" style="flex:1">
+    <span class="val" id="label-size-value">12</span>
+  </div>
+  <div class="row">
+    <label class="row" style="margin:0; gap:4px; flex:0 0 auto"
+           title="draw a frame for every link, not just the ones the spec selects">
+      <input type="checkbox" id="show-all-frames" style="width:auto">
+      all frames
+    </label>
+    <span class="sub" id="frame-count" style="margin-left:auto"></span>
+  </div>
+  <div id="joint-list"></div>
+
+  <h2>Export</h2>
+  <div class="sub" id="output-root"></div>
+  <div class="row" style="margin-top:8px">
+    <input type="text" id="export-name" placeholder="filename.urdf">
+  </div>
+
+  <!-- Delta table: the only way to see that frame rotation occurred.
+       A robot with ~12-26 links at exactly 90.000° is alignment working
+       correctly — this is NOT an error. The table is labelled accordingly. -->
+  <div id="delta-panel" style="display:none">
+    <h2>
+      Alignment deltas
+      <span class="sub" style="text-transform:none; letter-spacing:0; margin-left:4px">
+        — frame rotation is normal; mesh rotation near 0 is the invariant
+      </span>
+    </h2>
+    <div id="delta-table-wrap"></div>
+  </div>
+</aside>
+
+<div class="logbar" style="grid-column: 1 / -1">
+  <h2 style="margin:0">Activity</h2>
+  <span class="count" id="log-count"></span>
+  <button class="ghost" id="log-clear" style="margin-left:auto">clear</button>
+</div>
+<div id="log" style="grid-column: 1 / -1"></div>
+
+<!-- ============================================================ CLASSIC SCRIPT
+     Deliberately a classic script, not a module, and first on the page: an ES
+     module that fails to resolve an import aborts before a single line of its
+     code runs. That is exactly the failure this panel has to be able to report,
+     so the logger must exist independently of it.
+-->
+<script>
+(function () {
+  var MAX = 300;
+  var entries = 0;
+  function stamp() {
+    var d = new Date();
+    return String(d.getHours()).padStart(2, "0") + ":" +
+           String(d.getMinutes()).padStart(2, "0") + ":" +
+           String(d.getSeconds()).padStart(2, "0");
+  }
+  window.uiLog = function (message, kind) {
+    var box = document.getElementById("log");
+    if (!box) return;
+    var row = document.createElement("div");
+    row.className = "entry " + (kind || "info");
+    var t = document.createElement("span");
+    t.className = "t";
+    t.textContent = stamp();
+    var m = document.createElement("span");
+    m.className = "m";
+    m.textContent = message;
+    row.append(t, m);
+    box.appendChild(row);
+    while (box.children.length > MAX) box.removeChild(box.firstChild);
+    box.scrollTop = box.scrollHeight;
+    entries += 1;
+    var count = document.getElementById("log-count");
+    if (count) count.textContent = entries + " message(s)";
+  };
+
+  window.addEventListener("DOMContentLoaded", function () {
+    document.getElementById("log-clear").addEventListener("click", function () {
+      document.getElementById("log").innerHTML = "";
+      entries = 0;
+      document.getElementById("log-count").textContent = "";
+    });
+    uiLog("page loaded", "info");
+  });
+
+  // An unresolvable import surfaces here and nowhere else in the UI.
+  window.addEventListener("error", function (event) {
+    if (event.message) uiLog(event.message, "err");
+  }, true);
+  window.addEventListener("unhandledrejection", function (event) {
+    uiLog("unhandled: " + (event.reason && event.reason.message
+      ? event.reason.message : event.reason), "err");
+  });
+})();
+</script>
+
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/OrbitControls.js";
+import { STLLoader } from "three/addons/STLLoader.js";
+import { ColladaLoader } from "three/addons/ColladaLoader.js";
+import { OBJLoader } from "three/addons/OBJLoader.js";
+import { GLTFLoader } from "three/addons/GLTFLoader.js";
+
+const $ = (id) => document.getElementById(id);
+const AXIS_LEN = 0.08;
+// Provided by the classic script above, which loads even when this module
+// cannot. Fall back so the module never dies for want of a logger.
+const log = window.uiLog || (() => {});
+
+let model = null;          // /api/model payload
+let jointValues = {};      // name -> radians
+let spec = { chains: [], tcp: [], camera_references: [], rot_z: {} };
+let linkGroups = new Map();  // link name -> THREE.Group
+let labelSprites = [];       // the name captions, for bulk show/scale
+let labelsVisible = true;
+let labelSize = 12;
+let showAllFrames = false;
+let meshRoot = null;
+// Links whose triad the user switched off, keyed by link name so the choice
+// survives the re-render on every spec edit and stage toggle. Absent means
+// visible: the default is on, and a name alignment has not invented yet
+// (`*_tcp`, `*_camera_mount_compat`) simply has no entry until it appears.
+// Hiding covers the triad and its name label only -- never the mesh, never
+// the skeleton, and never `fitView`, so unticking a box cannot move the
+// camera out from under the user.
+let hiddenTriads = new Set();
+
+// Stage state: "source" always; "aligned" after first successful alignment.
+// alignedResult holds the last /api/align response so the toggle can redraw.
+let currentStage = "source";
+let alignedResult = null;     // last successful /api/align payload
+let isStale = false;          // spec edited after alignment ran
+
+// ---------------------------------------------------------------- scene
+
+const canvas = $("view");
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x14171c);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x334455, 2.2));
+const sun = new THREE.DirectionalLight(0xffffff, 1.4);
+sun.position.set(2, 3, 4);
+scene.add(sun);
+
+// URDF is Z-up; three.js is Y-up. Rotating the world once is simpler than
+// converting every transform, and keeps the server's matrices untouched.
+const world = new THREE.Group();
+world.rotation.x = -Math.PI / 2;
+scene.add(world);
+
+const grid = new THREE.GridHelper(2, 20, 0x2c323c, 0x22262e);
+scene.add(grid);
+
+const camera = new THREE.PerspectiveCamera(45, 1, 0.01, 100);
+const HOME = {
+  position: new THREE.Vector3(1.2, 1.0, 1.2),
+  target: new THREE.Vector3(0, 0, 0),
+};
+camera.position.copy(HOME.position);
+
+const controls = new OrbitControls(camera, canvas);
+controls.enableDamping = true;
+// Unbounded dolly makes a single scroll notch swallow the robot, and past
+// the camera's far plane it vanishes entirely with no way back.
+controls.minDistance = 0.05;
+controls.maxDistance = 20;
+// Keep panning near the robot: dragging the target away is the other way to
+// lose the scene and not find it again.
+controls.maxTargetRadius = 5;
+
+// Drive zoom from our own wheel handler rather than the library's.
+//
+// OrbitControls r160 computes its step as
+//     Math.abs(delta) / (100 * (window.devicePixelRatio | 0))
+// which has two problems here. `| 0` truncates, so a fractional
+// devicePixelRatio below 1 becomes 0 -- the divisor is zero, the exponent is
+// Infinity, and the zoom scale collapses to 0, jumping straight to a clamp.
+// And a `deltaY` of 1200, which X11 setups routinely emit, still moves ~27%
+// per notch even at a reduced zoomSpeed. Either way the step depends on how
+// the OS reports the wheel, which is not something the user can see.
+//
+// Instead: convert each event to a fraction of a notch and raise a fixed step
+// to that power, so one notch is one notch on every machine.
+controls.enableZoom = false;
+
+const ZOOM_STEP = 1.12;
+// What one detent reports in pixel mode -- the near-universal convention, and
+// what Chrome emits. Firefox reports lines instead (deltaY 3, deltaMode 1), so
+// a line is a third of a notch; pages are rare and land on the clamp anyway.
+const NOTCH_PX = 100;
+const LINE_PX = NOTCH_PX / 3;
+const PAGE_PX = NOTCH_PX;
+
+// Magnitude has to be read, not just its sign.
+//
+// A fixed step per *event* makes zoom track how many events a device emits,
+// which nothing guarantees. A high-resolution wheel decomposes one detent into
+// a burst -- 12 events of 10px is common -- and a per-event step turns that
+// into 1.12^12, a 3.9x jump for one notch, while a classic mouse sending one
+// 100px event moves 1.12x. That is the same OS-dependence as above wearing a
+// different hat: one notch must be one notch whether the device reports it
+// once or twenty times.
+//
+// So: normalise to pixels, clamp each event to at most a notch, and use the
+// fraction as the exponent. Bursts compose exactly (1.12^0.1 twelve times is
+// 1.12^1.2), a trackpad's small deltas stay small, and a 1200px X11 delta is
+// capped at a single step instead of scaling with whatever the OS chose.
+function wheelNotches(event) {
+  let px = event.deltaY;
+  if (event.deltaMode === 1) px *= LINE_PX;
+  else if (event.deltaMode === 2) px *= PAGE_PX;
+  return THREE.MathUtils.clamp(px, -NOTCH_PX, NOTCH_PX) / NOTCH_PX;
+}
+
+canvas.addEventListener(
+  "wheel",
+  (event) => {
+    event.preventDefault();
+    if (!event.deltaY) return;
+    const offset = camera.position.clone().sub(controls.target);
+    const factor = Math.pow(ZOOM_STEP, wheelNotches(event));
+    const distance = THREE.MathUtils.clamp(
+      offset.length() * factor,
+      controls.minDistance,
+      controls.maxDistance
+    );
+    camera.position
+      .copy(controls.target)
+      .addScaledVector(offset.normalize(), distance);
+    controls.update();
+  },
+  { passive: false }
+);
+
+const skeleton = new THREE.LineSegments(
+  new THREE.BufferGeometry(),
+  new THREE.LineBasicMaterial({ color: 0x6f7d92 })
+);
+world.add(skeleton);
+
+function resize() {
+  const w = canvas.clientWidth, h = canvas.clientHeight;
+  if (canvas.width !== w || canvas.height !== h) {
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+  }
+}
+
+function tick() {
+  resize();
+  controls.update();
+  renderer.render(scene, camera);
+  requestAnimationFrame(tick);
+}
+tick();
+
+function resetView() {
+  camera.position.copy(HOME.position);
+  controls.target.copy(HOME.target);
+  controls.update();
+}
+
+function fitView() {
+  // Frame whatever is actually on screen: a wrist-sized gripper and a
+  // dual-arm rig need very different distances, and a fixed one strands the
+  // user at the wrong scale.
+  const box = new THREE.Box3();
+  for (const group of linkGroups.values()) {
+    // Frame what is drawn. With most triads hidden, including every link
+    // would zoom out past the part under review.
+    if (!group.children.length) continue;
+    box.expandByPoint(
+      new THREE.Vector3(
+        group.matrix.elements[12],
+        group.matrix.elements[13],
+        group.matrix.elements[14]
+      ).applyMatrix4(world.matrixWorld)
+    );
+  }
+  if (box.isEmpty()) {
+    resetView();
+    return;
+  }
+
+  const centre = box.getCenter(new THREE.Vector3());
+  // A robot at the zero pose can be nearly planar, so pad the radius rather
+  // than divide by a size that may be ~0.
+  const radius = Math.max(box.getSize(new THREE.Vector3()).length() / 2, 0.05);
+  const distance = THREE.MathUtils.clamp(
+    radius / Math.tan((camera.fov * Math.PI) / 360) * 1.6,
+    controls.minDistance,
+    controls.maxDistance
+  );
+
+  const direction = camera.position
+    .clone()
+    .sub(controls.target)
+    .normalize();
+  if (direction.lengthSq() < 1e-9) direction.set(1, 1, 1).normalize();
+
+  controls.target.copy(centre);
+  camera.position.copy(centre).addScaledVector(direction, distance);
+  controls.update();
+}
+
+// ------------------------------------------------------------- drawing
+
+function triad(scale = 1) {
+  const group = new THREE.Group();
+  group.userData.triad = true;
+  const axes = [
+    [new THREE.Vector3(1, 0, 0), 0xe5484d],
+    [new THREE.Vector3(0, 1, 0), 0x38b26a],
+    [new THREE.Vector3(0, 0, 1), 0x4f9cf9],
+  ];
+  for (const [dir, color] of axes) {
+    group.add(new THREE.ArrowHelper(
+      dir, new THREE.Vector3(), AXIS_LEN * scale, color,
+      AXIS_LEN * scale * 0.3, AXIS_LEN * scale * 0.2
+    ));
+  }
+  return group;
+}
+
+// Labels are sprites so they always face the camera: a link name drawn on a
+// plane is unreadable from behind, and a dual-arm robot carries dozens of
+// them. The texture is drawn once per name and reused; only the sprite's
+// world scale changes when the size slider moves, so dragging it does not
+// re-rasterise every canvas.
+const LABEL_PIXEL_HEIGHT = 64;   // texture resolution, not display size
+
+function labelTexture(text) {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  const font = `600 ${LABEL_PIXEL_HEIGHT * 0.72}px ui-monospace, monospace`;
+  context.font = font;
+  const width = Math.ceil(context.measureText(text).width) + 16;
+  canvas.width = width;
+  canvas.height = LABEL_PIXEL_HEIGHT;
+
+  // Re-apply: resizing the canvas resets the 2D context.
+  context.font = font;
+  context.textBaseline = "middle";
+  context.fillStyle = "rgba(20,23,28,0.72)";
+  context.fillRect(0, 0, width, LABEL_PIXEL_HEIGHT);
+  context.fillStyle = "#e6e9ef";
+  context.fillText(text, 8, LABEL_PIXEL_HEIGHT / 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.minFilter = THREE.LinearFilter;
+  return { texture, aspect: width / LABEL_PIXEL_HEIGHT };
+}
+
+function makeLabel(text) {
+  const { texture, aspect } = labelTexture(text);
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: texture,
+      depthTest: false,        // stay readable through the robot's own meshes
+      transparent: true,
+    })
+  );
+  sprite.userData.aspect = aspect;
+  sprite.userData.label = true;
+  // Sit just off the frame origin so the text does not sit on the triad.
+  sprite.position.set(0, 0, AXIS_LEN * 0.45);
+  sprite.renderOrder = 10;
+  return sprite;
+}
+
+function applyLabelScale() {
+  // The slider is in "points"; convert to a world height so a label keeps a
+  // consistent apparent size against a metre-scale robot.
+  const height = labelSize * 0.0025;
+  for (const sprite of labelSprites) {
+    sprite.visible = labelsVisible;
+    sprite.scale.set(height * sprite.userData.aspect, height, 1);
+  }
+}
+
+function buildLinkGroups() {
+  for (const group of linkGroups.values()) {
+    disposeTree(group);
+    world.remove(group);
+  }
+  linkGroups = new Map();
+  labelSprites = [];
+  // A robot carries far more links than an alignment is about. Draw a triad
+  // and a name only for the frames the spec selects -- the link each chain
+  // joint drives, plus the emitted TCP and camera-compat frames -- unless the
+  // user asks to see everything. The skeleton still shows every link, so
+  // nothing disappears from the robot's shape.
+  //
+  // model.focus_links already includes TCP base links and TCP-joint child
+  // links (computed server-side in _focus_links_source).
+  const focus = new Set(model.focus_links || model.links);
+  for (const name of model.links) {
+    const group = new THREE.Group();
+    group.matrixAutoUpdate = false;
+    const interesting = focus.has(name);
+    group.userData.focus = interesting;
+    // An unchecked box hides the frame in either mode: "all frames" widens
+    // which links are eligible for a triad, it does not override a link the
+    // user explicitly switched off.
+    if ((interesting || showAllFrames) && !hiddenTriads.has(name)) {
+      group.add(triad());
+      const label = makeLabel(name);
+      group.add(label);
+      labelSprites.push(label);
+    }
+    world.add(group);
+    linkGroups.set(name, group);
+  }
+  applyLabelScale();
+  // Mark TCP base-link origins with a small sphere so the user can see which
+  // link the TCP is attached to without confusing it with the oversized triad
+  // used for emitted (_tcp) links after alignment.
+  markTcpBaseLinkOrigins(model.tcp_base_links || []);
+}
+
+// The source and aligned robots have different link sets: alignment adds one
+// `_tcp` link per TCP plus any camera-compat links. `buildLinkGroups` and the
+// skeleton in `applyTransforms` both read `model.links` / `model.edges`, so
+// switching stage means swapping that topology and rebuilding -- otherwise
+// the extra poses arrive with no group to land in and are dropped silently.
+let sourceTopology = null;
+
+function applySourceTopology() {
+  if (!sourceTopology) return;
+  Object.assign(model, sourceTopology);
+  buildLinkGroups();
+  updateFrameCount();
+  loadMeshes();
+  // The focus set shrinks back: the emitted frames do not exist here, so
+  // their checkboxes must go with them.
+  renderJoints();
+}
+
+function applyAlignedTopology(payload) {
+  if (!payload || !payload.links) return;
+  if (!sourceTopology) {
+    sourceTopology = {
+      links: model.links,
+      edges: model.edges,
+      focus_links: model.focus_links,
+      meshes: model.meshes,
+    };
+  }
+  model.links = payload.links;
+  model.edges = payload.edges || model.edges;
+  model.focus_links = payload.focus_links || model.focus_links;
+  // Aligned origins, not the source's. Alignment folds the axis rotation's
+  // inverse into the visual origins of every link it reorients, so drawing
+  // aligned poses with source origins leaves those meshes visibly turned --
+  // by up to a full 180 degrees on a gripper whose axis was antipodal.
+  model.meshes = payload.meshes || model.meshes;
+  buildLinkGroups();
+  updateFrameCount();
+  loadMeshes();
+  // Emitted frames get the oversized triad; they are in the focus set now, so
+  // the group exists for it to attach to.
+  markTcpLinks(
+    (payload.alignment?.tcp_links || []).concat(
+      payload.alignment?.compat_links || []
+    )
+  );
+  // Alignment invents `*_tcp` and `*_camera_mount_compat`, which enter the
+  // focus set only now. Re-render so they get a checkbox; `renderJoints` runs
+  // once at bootstrap otherwise, and they would have none.
+  renderJoints();
+}
+
+function applyTransforms(transforms) {
+  for (const [name, flat] of Object.entries(transforms)) {
+    const group = linkGroups.get(name);
+    if (!group) continue;
+    // Server sends row-major; three.js `set` takes row-major too.
+    group.matrix.set(...flat);
+  }
+  const positions = [];
+  for (const [a, b] of model.edges) {
+    const ga = linkGroups.get(model.links[a]);
+    const gb = linkGroups.get(model.links[b]);
+    if (!ga || !gb) continue;
+    positions.push(
+      ga.matrix.elements[12], ga.matrix.elements[13], ga.matrix.elements[14],
+      gb.matrix.elements[12], gb.matrix.elements[13], gb.matrix.elements[14]
+    );
+  }
+  skeleton.geometry.dispose();
+  skeleton.geometry = new THREE.BufferGeometry();
+  skeleton.geometry.setAttribute(
+    "position", new THREE.Float32BufferAttribute(positions, 3)
+  );
+}
+
+function markTcpLinks(names) {
+  for (const name of names) {
+    const group = linkGroups.get(name);
+    // A link the user switched off must stay off. Without this, the mark
+    // pass would hand an emitted frame a fresh triad on the next pose reply
+    // and the box would appear to do nothing -- these are exactly the links
+    // it marks. Note the `children.length` guard below does not cover it: a
+    // hidden TCP base link still has its origin sphere.
+    if (hiddenTriads.has(name)) continue;
+    // TCP and compat links are always in the focus set, so this only ever
+    // emphasises a frame that is already drawn.
+    if (group && group.children.length && !group.userData.marked) {
+      // Replace the regular triad rather than adding to it. Both are drawn at
+      // the same origin on the same axes, so stacking them leaves the small
+      // one buried inside the large one -- reading as doubled arrowheads and
+      // a stray stub on every axis, which is what an emphasised frame is
+      // supposed to distinguish itself *from*.
+      for (const child of [...group.children]) {
+        if (child.userData.triad) {
+          disposeTree(child);
+          group.remove(child);
+        }
+      }
+      group.add(triad(2.2));
+      group.userData.marked = true;
+    }
+  }
+}
+
+// Place a small sphere at the frame origin of each selected TCP base link.
+// This distinguishes the base link from the emitted _tcp link (which gets the
+// oversized triad treatment via markTcpLinks) without reusing that vocabulary.
+function markTcpBaseLinkOrigins(names) {
+  for (const name of names) {
+    const group = linkGroups.get(name);
+    if (!group || group.userData.tcpOriginMarked) continue;
+    const sphere = new THREE.Mesh(
+      // Small enough to read as a point on the origin rather than a blob
+      // covering the triad it marks.
+      new THREE.SphereGeometry(AXIS_LEN * 0.12, 12, 8),
+      new THREE.MeshBasicMaterial({ color: 0xf0cd8a, depthTest: false })
+    );
+    sphere.renderOrder = 9;
+    sphere.userData.tcpOrigin = true;
+    group.add(sphere);
+    group.userData.tcpOriginMarked = true;
+  }
+}
+
+// Toggle one link's triad, touching only that link's group.
+//
+// A full rebuild would re-fetch every mesh in the robot -- on a large one that
+// is seconds of loading to add or remove three arrows. The group itself, its
+// meshes, and its pose all survive here, so the triad can simply be added or
+// removed: the group already carries its world transform, and a child added to
+// it lands at that transform without asking the server for a new pose.
+function setTriadVisible(linkName, visible) {
+  if (visible) hiddenTriads.delete(linkName);
+  else hiddenTriads.add(linkName);
+
+  const group = linkGroups.get(linkName);
+  if (group) {
+    for (const child of [...group.children]) {
+      if (child.userData.triad || child.userData.label) {
+        if (child.userData.label) {
+          labelSprites = labelSprites.filter((s) => s !== child);
+        }
+        disposeTree(child);
+        group.remove(child);
+      }
+    }
+    // Showing obeys the same eligibility rule the build pass uses: "all
+    // frames" widens which links may carry a triad, it does not grant one to
+    // a link outside the focus set when that switch is off.
+    if (visible && (group.userData.focus || showAllFrames)) {
+      // A link `markTcpLinks` emphasised keeps its oversized triad across a
+      // hide/show cycle. `marked` is deliberately left set while hidden, so
+      // the mark pass does not treat this as an unmarked link and re-add one.
+      group.add(triad(group.userData.marked ? 2.2 : 1));
+      const label = makeLabel(linkName);
+      group.add(label);
+      labelSprites.push(label);
+      applyLabelScale();
+    }
+  }
+  updateFrameCount();
+}
+
+function updateFrameCount() {
+  // Count triads, not children: a hidden TCP base link still carries its
+  // origin sphere, so counting non-empty groups would report it as drawn.
+  const drawn = [...linkGroups.values()].filter((group) =>
+    group.children.some((child) => child.userData.triad)
+  ).length;
+  $("frame-count").textContent = `${drawn} of ${linkGroups.size} frames`;
+}
+
+// --------------------------------------------------------------- meshes
+
+const LOADERS = {
+  ".stl": () => new STLLoader(),
+  ".dae": () => new ColladaLoader(),
+  ".obj": () => new OBJLoader(),
+  ".glb": () => new GLTFLoader(),
+  ".gltf": () => new GLTFLoader(),
+};
+
+// No per-format frame correction here, deliberately. glTF is Y-up by spec, so
+// it is tempting to rotate .glb by +90 about X -- but a URDF that references
+// Y-up meshes already compensates in each <visual><origin> rpy, and rotating
+// again double-applies it. Whatever the mesh's own convention, the URDF's
+// origin is the authority; honour it and nothing else.
+//
+// ColladaLoader breaks that rule on our behalf, so it has to be undone. A
+// `.dae` declaring `<up_axis>Z_UP</up_axis>` makes the loader set
+// `scene.rotation.x = -PI/2` (ColladaLoader.js:4091-4095) to hand three.js a
+// Y-up asset. That is right for a bare model viewer and wrong for a URDF: the
+// URDF already places the mesh via `<visual><origin>`, so the loader's
+// rotation is a second, unasked-for -90 about X and every `.dae` link lands a
+// quarter turn off.
+//
+// Confirmed against robots shipping both a `.dae` and a `.STL` per link with
+// identical vertices on identical axes: STL gets no loader rotation, so it
+// serves as ground truth, and only the `.dae` links drew turned.
+//
+// Matched on the rotation the loader actually applies rather than on the file
+// suffix: a `Y_UP` Collada file gets no rotation, and zeroing it there would
+// be a no-op only by luck. The loader also flags this itself with a
+// console.warn citing three.js #24289 -- it rotates the node without
+// converting vertex data, so this is a documented wart, not a bug to patch
+// upstream in vendored code.
+//
+// Only the rotation is cleared. `scene.scale` carries `asset.unit`, the file's
+// declared metres-per-unit, which is a genuine property of the mesh (a model
+// authored in millimetres needs it) and must survive.
+const COLLADA_UP_AXIS_FIX_X = -Math.PI / 2;
+
+function neutralizeLoaderUpAxis(object) {
+  const r = object.rotation;
+  if (
+    Math.abs(r.x - COLLADA_UP_AXIS_FIX_X) < 1e-9 &&
+    Math.abs(r.y) < 1e-9 &&
+    Math.abs(r.z) < 1e-9
+  ) {
+    r.set(0, 0, 0);
+  }
+  return object;
+}
+
+function suffixOf(path) {
+  const dot = path.lastIndexOf(".");
+  // Case-insensitive: `.STL` is more common than `.stl` in the wild.
+  return dot < 0 ? "" : path.slice(dot).toLowerCase();
+}
+
+function disposeTree(root) {
+  // three.js does not free GPU buffers on remove(); without this, toggling
+  // meshes leaks a full copy of the robot's geometry each time. Sprite
+  // materials additionally own a canvas texture, which leaks separately.
+  root.traverse((node) => {
+    node.geometry?.dispose();
+    const material = node.material;
+    for (const entry of Array.isArray(material) ? material : [material]) {
+      entry?.map?.dispose();
+      entry?.dispose();
+    }
+  });
+}
+
+function loadMeshes() {
+  if (meshRoot) {
+    disposeTree(meshRoot);
+    world.remove(meshRoot);
+  }
+  meshRoot = new THREE.Group();
+  world.add(meshRoot);
+  if (!$("show-meshes").checked) {
+    for (const group of linkGroups.values()) {
+      for (const child of [...group.children]) {
+        if (child.userData.mesh) {
+          disposeTree(child);
+          group.remove(child);
+        }
+      }
+    }
+    return;
+  }
+
+  const material = new THREE.MeshStandardMaterial({
+    color: 0x9aa6b8, metalness: 0.1, roughness: 0.8,
+    transparent: true, opacity: 0.85,
+  });
+
+  let requested = 0, loaded = 0, failed = 0;
+
+  for (const [link, entries] of Object.entries(model.meshes || {})) {
+    const parent = linkGroups.get(link);
+    if (!parent) continue;
+    for (const entry of entries) {
+      const make = LOADERS[suffixOf(entry.filename)];
+      // An unsupported or missing mesh must not block review: the triads and
+      // skeleton are the load-bearing view, meshes are context. Say so
+      // rather than leaving a link mysteriously bare.
+      if (!make) {
+        log(`no loader for ${entry.filename} (${link})`, "warn");
+        continue;
+      }
+      const url = "/meshes/" + entry.path;
+      requested += 1;
+      make().load(url, (result) => {
+        const object = result.isBufferGeometry
+          ? new THREE.Mesh(result, material)
+          : (result.scene || result);
+        neutralizeLoaderUpAxis(object);
+        object.traverse?.((child) => {
+          if (child.isMesh) child.material = material;
+        });
+        const holder = new THREE.Group();
+        holder.userData.mesh = true;
+        holder.add(object);
+        holder.position.set(...entry.origin.xyz);
+        holder.rotation.set(...entry.origin.rpy, "ZYX");
+        holder.scale.set(...entry.scale);
+        parent.add(holder);
+        loaded += 1;
+        if (loaded + failed === requested) {
+          log(
+            `meshes: ${loaded} loaded` + (failed ? `, ${failed} failed` : ""),
+            failed ? "warn" : "ok"
+          );
+        }
+      }, undefined, () => {
+        failed += 1;
+        log(`mesh failed: ${entry.filename}`, "warn");
+        if (loaded + failed === requested) {
+          log(`meshes: ${loaded} loaded, ${failed} failed`, "warn");
+        }
+      });
+    }
+  }
+}
+
+// ------------------------------------------------------------ networking
+
+let seq = 0, inflight = false, pending = null, applied = -1;
+let fittedOnce = false;
+
+function requestPose() {
+  pending = { ...jointValues };
+  if (inflight) return;              // coalesce: newest wins
+  inflight = true;
+  const body = { seq: ++seq, joints: pending, spec, stage: currentStage };
+  pending = null;
+  fetch("/api/pose", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })
+    .then((r) => r.json())
+    .then((payload) => {
+      if (payload.error) {
+        setStatus(payload.error, "err");
+        log("pose rejected: " + payload.error, "err");
+        return;
+      }
+      if (payload.seq <= applied) return;   // a newer reply already landed
+      applied = payload.seq;
+      applyTransforms(payload.transforms);
+      markTcpLinks(payload.tcp_links.concat(payload.compat_links));
+      if (!fittedOnce) {
+        // Only now are the link transforms known, so this is the first
+        // moment the view can be framed to the robot's actual size.
+        fittedOnce = true;
+        fitView();
+      }
+      setStatus("");
+    })
+    .catch((error) => {
+      setStatus(String(error), "err");
+      log("pose request failed: " + error, "err");
+    })
+    .finally(() => {
+      inflight = false;
+      if (pending) requestPose();
+    });
+}
+
+function setStatus(text, kind) {
+  $("status").textContent = text;
+  $("status").style.color = kind === "err" ? "var(--err)" : "var(--muted)";
+}
+
+// ------------------------------------------------------- stale tracking
+
+// Mark the aligned view stale whenever the spec changes while we have an
+// alignment result. This does NOT drop back to stage 1; it just badges the
+// stale view and highlights "Run alignment".
+function onSpecChanged() {
+  if (alignedResult !== null && !isStale) {
+    isStale = true;
+    $("stale-badge").style.display = "inline";
+    const btn = $("btn-run-align");
+    btn.classList.add("stale-run");
+    btn.textContent = "Run alignment (stale)";
+  }
+  updateYamlPreview();
+}
+
+function clearStale() {
+  isStale = false;
+  $("stale-badge").style.display = "none";
+  const btn = $("btn-run-align");
+  btn.classList.remove("stale-run");
+  btn.textContent = "Run alignment";
+}
+
+// ----------------------------------------------------------------- panels
+
+function renderJoints() {
+  const byName = new Map(model.joints.map((j) => [j.name, j]));
+  const grouped = model.chains.length
+    ? model.chains
+    : [model.joints.map((j) => j.name)];
+  // tcp_joints[i] are the gripper joints paired with chains[i].
+  const tcpJoints = model.tcp_joints || [];
+
+  $("joint-list").innerHTML = "";
+  grouped.forEach((names, index) => {
+    const box = document.createElement("div");
+    box.className = "chain";
+    if (grouped.length > 1) {
+      const title = document.createElement("div");
+      title.className = "sub";
+      title.textContent = `chain ${index}`;
+      box.appendChild(title);
+    }
+    for (const name of names) {
+      const joint = byName.get(name);
+      if (!joint) continue;
+      box.appendChild(jointRow(joint));
+    }
+    // Append this chain's TCP gripper joints after a divider, if any.
+    const gripperNames = tcpJoints[index] || [];
+    if (gripperNames.length) {
+      const divider = document.createElement("hr");
+      divider.style.cssText =
+        "border:0; border-top:1px solid var(--line); margin:6px 0";
+      box.appendChild(divider);
+      const subLabel = document.createElement("div");
+      subLabel.className = "sub";
+      subLabel.textContent = "tcp joints";
+      box.appendChild(subLabel);
+      for (const name of gripperNames) {
+        const joint = byName.get(name);
+        if (!joint) continue;
+        box.appendChild(jointRow(joint));
+      }
+    }
+    $("joint-list").appendChild(box);
+  });
+  renderUndrivenFrames(byName, grouped, tcpJoints);
+}
+
+// Focused links that no rendered slider drives: the TCP base links, and after
+// alignment the emitted `*_tcp` and `*_camera_mount_compat` frames. They are
+// the frames alignment creates and so the ones most worth toggling, but they
+// hang off fixed joints and would otherwise have no checkbox anywhere.
+function renderUndrivenFrames(byName, grouped, tcpJoints) {
+  const driven = new Set();
+  for (const names of [...grouped, ...tcpJoints]) {
+    for (const name of names || []) {
+      const joint = byName.get(name);
+      if (joint) driven.add(joint.child);
+    }
+  }
+  const names = (model.focus_links || []).filter((n) => !driven.has(n));
+  if (!names.length) return;
+
+  const box = document.createElement("div");
+  box.className = "chain";
+  const title = document.createElement("div");
+  title.className = "sub";
+  title.textContent = "emitted frames";
+  title.title =
+    "focused frames with no joint to drive them: TCP base links, and the " +
+    "links alignment creates";
+  box.appendChild(title);
+  for (const name of names) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const label = document.createElement("label");
+    label.textContent = name;
+    row.append(triadCheckbox(name, name), label);
+    box.appendChild(row);
+  }
+  $("joint-list").appendChild(box);
+}
+
+// One checkbox governing whether `linkName`'s triad is drawn. Checked is the
+// default and means visible, so a link the user has never touched is on.
+function triadCheckbox(linkName, title) {
+  const box = document.createElement("input");
+  box.type = "checkbox";
+  box.checked = !hiddenTriads.has(linkName);
+  box.style.cssText = "width:auto; flex:0 0 auto; margin:0";
+  box.dataset.triadLink = linkName;
+  box.title = `${title}: show the coordinate axes triad`;
+  box.addEventListener("change", () => {
+    setTriadVisible(linkName, box.checked);
+  });
+  return box;
+}
+
+function jointRow(joint) {
+  const wrap = document.createElement("div");
+  const head = document.createElement("div");
+  head.className = "row";
+  // The triad is drawn on the link the joint drives, not on the joint, so
+  // the box is keyed by `joint.child`. Two joints never share a child, so
+  // this stays one box per frame.
+  const box = triadCheckbox(joint.child, `${joint.name} -> ${joint.child}`);
+  const label = document.createElement("label");
+  label.textContent = joint.name;
+  label.title = `${joint.type} → ${joint.child}`;
+  const value = document.createElement("span");
+  value.className = "val";
+  head.append(box, label, value);
+
+  const slider = document.createElement("input");
+  slider.type = "range";
+  slider.min = joint.lower;
+  slider.max = joint.upper;
+  slider.step = (joint.upper - joint.lower) / 500 || 0.001;
+  slider.value = jointValues[joint.name] ?? 0;
+
+  // Bounds flank the slider so the range a joint can reach is readable
+  // without hovering. `continuous` joints declare none, so the ±pi shown is
+  // a display range rather than a real limit -- mark it as such.
+  const track = document.createElement("div");
+  track.className = "track";
+  const lower = document.createElement("span");
+  lower.className = "bound";
+  lower.textContent = joint.lower.toFixed(2);
+  const upper = document.createElement("span");
+  upper.className = "bound";
+  upper.textContent = joint.upper.toFixed(2);
+  if (joint.type === "continuous") {
+    lower.classList.add("soft");
+    upper.classList.add("soft");
+    const hint = "continuous joint: unbounded, shown over ±pi";
+    lower.title = hint;
+    upper.title = hint;
+  }
+  track.append(lower, slider, upper);
+
+  const show = () => { value.textContent = (+slider.value).toFixed(3); };
+  show();
+  slider.addEventListener("input", () => {
+    jointValues[joint.name] = +slider.value;
+    show();
+    requestPose();
+  });
+  wrap.append(head, track);
+  wrap.dataset.joint = joint.name;
+  return wrap;
+}
+
+function syncSliders() {
+  for (const wrap of $("joint-list").querySelectorAll("[data-joint]")) {
+    const slider = wrap.querySelector("input[type=range]");
+    const name = wrap.dataset.joint;
+    slider.value = jointValues[name] ?? 0;
+    wrap.querySelector(".val").textContent = (+slider.value).toFixed(3);
+  }
+}
+
+// ---------------------------------------------------------- spec editor
+
+// Render the left-panel chains editor from spec.chains.
+function renderChains() {
+  const list = $("chain-list");
+  list.innerHTML = "";
+
+  // Full movable-joint names for the add-to-chain selector.
+  const allJoints = model.joints.map((j) => j.name);
+
+  spec.chains.forEach((group, chainIdx) => {
+    const box = document.createElement("div");
+    box.className = "chain-group";
+
+    const header = document.createElement("div");
+    header.className = "row";
+    header.style.marginBottom = "4px";
+    const title = document.createElement("span");
+    title.className = "sub";
+    title.textContent = `chain ${chainIdx}`;
+    const removeChain = document.createElement("button");
+    removeChain.className = "ghost";
+    removeChain.style.cssText = "padding:2px 7px; font-size:11px; margin-left:auto";
+    removeChain.textContent = "remove chain";
+    removeChain.addEventListener("click", () => {
+      spec.chains.splice(chainIdx, 1);
+      spec.tcp.splice(chainIdx, 1);
+      onSpecChanged();
+      renderChains();
+      renderTcps();
+      requestPose();
+    });
+    header.append(title, removeChain);
+    box.appendChild(header);
+
+    // One row per joint: name on the left, its manual Z rotation in the
+    // middle, and the remove cross on the right. rot_z lives in a sparse map
+    // keyed by joint name rather than on the row, so reordering a chain or
+    // dropping a joint can never shift an angle onto its neighbour.
+    const chipRow = document.createElement("div");
+    chipRow.className = "chip-row";
+    chipRow.style.flexDirection = "column";
+    chipRow.style.alignItems = "stretch";
+    group.forEach((jointName, jointIdx) => {
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.style.cssText = "display:flex; align-items:center; gap:6px";
+
+      const label = document.createElement("span");
+      label.style.flex = "1";
+      label.style.overflow = "hidden";
+      label.style.textOverflow = "ellipsis";
+      label.textContent = jointName;
+      label.title = jointName;
+
+      const rot = document.createElement("input");
+      rot.type = "number";
+      rot.step = "any";
+      rot.className = "rot-z-input";
+      rot.style.cssText = "width:62px; padding:1px 3px; font-size:11px";
+      rot.title = `${jointName}: extra rotation about its own +Z, degrees`;
+      rot.value = spec.rot_z && spec.rot_z[jointName] != null
+        ? spec.rot_z[jointName] : 0;
+      rot.addEventListener("change", () => {
+        const degrees = Number(rot.value);
+        if (!Number.isFinite(degrees)) { rot.value = 0; return; }
+        if (!spec.rot_z) spec.rot_z = {};
+        // An absent key and a zero mean the same thing; storing only
+        // non-zero entries keeps the exported yaml free of no-op noise.
+        if (degrees === 0) delete spec.rot_z[jointName];
+        else spec.rot_z[jointName] = degrees;
+        onSpecChanged();
+      });
+
+      const del = document.createElement("button");
+      del.textContent = "×";
+      del.title = "remove from chain";
+      del.addEventListener("click", () => {
+        group.splice(jointIdx, 1);
+        onSpecChanged();
+        renderChains();
+        requestPose();
+      });
+
+      chip.append(label, rot, del);
+      chipRow.appendChild(chip);
+    });
+    if (!group.length) {
+      const empty = document.createElement("span");
+      empty.className = "sub";
+      empty.textContent = "empty";
+      chipRow.appendChild(empty);
+    }
+    box.appendChild(chipRow);
+
+    // Add-joint selector
+    const addRow = document.createElement("div");
+    addRow.className = "chain-add";
+    const sel = document.createElement("select");
+    for (const name of allJoints) {
+      const opt = document.createElement("option");
+      opt.value = opt.textContent = name;
+      sel.appendChild(opt);
+    }
+    const addBtn = document.createElement("button");
+    addBtn.className = "ghost";
+    addBtn.textContent = "+ add joint";
+    addBtn.addEventListener("click", () => {
+      const name = sel.value;
+      if (!name) return;
+      if (group.includes(name)) {
+        log(`joint ${name} already in chain ${chainIdx}`, "warn");
+        return;
+      }
+      group.push(name);
+      onSpecChanged();
+      renderChains();
+      requestPose();
+    });
+    addRow.append(sel, addBtn);
+    box.appendChild(addRow);
+
+    list.appendChild(box);
+  });
+}
+
+function renderTcps() {
+  $("tcp-list").innerHTML = "";
+  spec.tcp.forEach((entry, index) => {
+    if (!entry) return;
+    const box = document.createElement("div");
+    box.className = "tcp";
+
+    // Chain label (if chains declared)
+    if (spec.chains && spec.chains.length) {
+      const label = document.createElement("div");
+      label.className = "sub";
+      label.style.marginBottom = "4px";
+      label.textContent = `chain ${index}`;
+      box.appendChild(label);
+    }
+
+    const select = document.createElement("select");
+    for (const link of model.links) {
+      const option = document.createElement("option");
+      option.value = option.textContent = link;
+      option.selected = link === entry.base_link;
+      select.appendChild(option);
+    }
+    select.addEventListener("change", () => {
+      entry.base_link = select.value;
+      onSpecChanged();
+      requestPose();
+    });
+
+    box.appendChild(select);
+    box.appendChild(vectorRow("xyz (m)", entry, "xyz"));
+    box.appendChild(vectorRow("rpy (deg)", entry, "rpy"));
+
+    const remove = document.createElement("button");
+    remove.className = "ghost";
+    remove.textContent = "remove";
+    remove.style.marginTop = "6px";
+    remove.addEventListener("click", () => {
+      // Null the slot rather than splice it: with chains declared, tcp[i]
+      // belongs to chains[i], so removing an element would shift every later
+      // TCP onto the wrong chain.
+      if (spec.chains && spec.chains.length) {
+        spec.tcp[index] = null;
+      } else {
+        spec.tcp.splice(index, 1);
+      }
+      log(`removed TCP on ${entry.base_link}`, "info");
+      onSpecChanged();
+      renderTcps();
+      requestPose();
+    });
+    box.appendChild(remove);
+    $("tcp-list").appendChild(box);
+  });
+}
+
+function vectorRow(title, entry, key) {
+  const wrap = document.createElement("div");
+  const label = document.createElement("div");
+  label.className = "sub";
+  label.textContent = title;
+  const row = document.createElement("div");
+  row.className = "vec";
+  for (let i = 0; i < 3; i++) {
+    const input = document.createElement("input");
+    input.type = "number";
+    input.step = key === "rpy" ? 15 : 0.005;
+    input.value = entry[key][i];
+    input.addEventListener("input", () => {
+      entry[key][i] = +input.value || 0;
+      onSpecChanged();
+      requestPose();
+    });
+    row.appendChild(input);
+  }
+  wrap.append(label, row);
+  return wrap;
+}
+
+function renderCameras() {
+  const list = $("camera-list");
+  list.innerHTML = "";
+  spec.camera_references.forEach((reference, idx) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    const text = document.createElement("span");
+    text.style.flex = "1";
+    text.textContent = reference.link;
+    const del = document.createElement("button");
+    del.className = "ghost";
+    del.style.cssText = "padding:2px 7px; font-size:11px";
+    del.textContent = "×";
+    del.title = "remove camera reference";
+    del.addEventListener("click", () => {
+      spec.camera_references.splice(idx, 1);
+      onSpecChanged();
+      renderCameras();
+    });
+    row.append(text, del);
+    list.appendChild(row);
+  });
+  if (!spec.camera_references.length) {
+    const empty = document.createElement("div");
+    empty.className = "sub";
+    empty.textContent = "none declared";
+    list.appendChild(empty);
+  }
+}
+
+function renderDiagnostics() {
+  const list = $("diagnostics-list");
+  list.innerHTML = "";
+  const diags = model.diagnostics || [];
+  if (!diags.length) {
+    const empty = document.createElement("div");
+    empty.className = "sub";
+    empty.textContent = "no issues found";
+    list.appendChild(empty);
+    return;
+  }
+  for (const d of diags) {
+    const div = document.createElement("div");
+    div.className = `diag ${d.severity}`;
+    div.textContent = `[${d.severity}] ${d.message}`;
+    list.appendChild(div);
+  }
+}
+
+function renderWarnings() {
+  const box = $("model-warnings");
+  box.innerHTML = "";
+  for (const text of model.warnings || []) {
+    const div = document.createElement("div");
+    div.className = "msg warn";
+    div.textContent = text;
+    box.appendChild(div);
+  }
+}
+
+// ---------------------------------------------------------- YAML preview
+
+// The server renders the preview, so the pane shows what an export writes.
+let yamlPreviewSeq = 0;
+
+function updateYamlPreview() {
+  const seq = ++yamlPreviewSeq;
+  fetch("/api/export/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ spec, preview: true }),
+  })
+    .then((r) => r.json())
+    .then((payload) => {
+      // A slower earlier request must not overwrite a newer rendering.
+      if (seq !== yamlPreviewSeq) return;
+      $("yaml-preview").textContent = payload.yaml || payload.error || "{}";
+    })
+    .catch((err) => {
+      if (seq !== yamlPreviewSeq) return;
+      $("yaml-preview").textContent = String(err);
+    });
+}
+
+
+// ---------------------------------------------------------- delta table
+
+// Render the /api/align `deltas` array into the delta table panel.
+// The table is the only way to see that alignment rotated link frames
+// (meshes hold still by design). Highlight rotated links in accent colour;
+// explicitly label the table so a reader does not mistake 90° for an error.
+function renderDeltaTable(deltas) {
+  const wrap = $("delta-table-wrap");
+  wrap.innerHTML = "";
+  const table = document.createElement("table");
+  const head = document.createElement("tr");
+  for (const label of ["link", "pos Δ (m)", "rot Δ (°)", "mesh pos Δ (m)", "mesh rot Δ (°)"]) {
+    const th = document.createElement("th");
+    th.textContent = label;
+    head.appendChild(th);
+  }
+  table.appendChild(head);
+  for (const row of deltas) {
+    const tr = document.createElement("tr");
+    const rotated = row.rotation_delta > 0.01;
+    const cells = [
+      row.link,
+      row.position_delta == null ? "—" : row.position_delta.toExponential(2),
+      row.rotation_delta == null ? "—" : row.rotation_delta.toFixed(3),
+      row.mesh_position_delta == null ? "—" : row.mesh_position_delta.toExponential(2),
+      row.mesh_rotation_delta == null ? "—" : row.mesh_rotation_delta.toFixed(3),
+    ];
+    cells.forEach((text, idx) => {
+      const td = document.createElement("td");
+      td.textContent = text;
+      // Column 2 (rotation delta) in accent when the frame rotated — this is
+      // alignment working, not an error.
+      if (idx === 2 && rotated) td.className = "rotated";
+      tr.appendChild(td);
+    });
+    table.appendChild(tr);
+  }
+  wrap.appendChild(table);
+  $("delta-panel").style.display = "";
+}
+
+// ------------------------------------------------------------------ wiring
+
+$("zero-all").addEventListener("click", () => {
+  jointValues = {};
+  syncSliders();
+  requestPose();
+});
+
+$("sweep-all").addEventListener("click", () => {
+  // Mirrors the server's diagnostic sweep: alternating signs, growing
+  // magnitude, so every joint moves distinguishably.
+  model.joints.forEach((joint, index) => {
+    const value = 0.08 * (index + 1) * (index % 2 === 0 ? 1 : -1);
+    jointValues[joint.name] =
+      Math.max(joint.lower, Math.min(joint.upper, value));
+  });
+  syncSliders();
+  requestPose();
+});
+
+$("show-meshes").addEventListener("change", loadMeshes);
+
+$("show-labels").addEventListener("change", () => {
+  labelsVisible = $("show-labels").checked;
+  applyLabelScale();
+});
+
+$("show-all-frames").addEventListener("change", () => {
+  showAllFrames = $("show-all-frames").checked;
+  // Rebuilding is what adds or removes the triads; the pose then re-applies.
+  buildLinkGroups();
+  loadMeshes();
+  updateFrameCount();
+  requestPose();
+  log(
+    showAllFrames
+      ? "showing a frame for every link"
+      : "showing only the frames the spec selects",
+    "info"
+  );
+});
+
+$("label-size").addEventListener("input", () => {
+  labelSize = +$("label-size").value;
+  $("label-size-value").textContent = labelSize;
+  applyLabelScale();
+});
+
+$("view-reset").addEventListener("click", () => {
+  resetView();
+  log("view reset", "info");
+});
+
+$("view-fit").addEventListener("click", () => {
+  fitView();
+  log("view fitted to the robot", "info");
+});
+
+// Keyboard shortcuts, ignored while typing into a spec field.
+window.addEventListener("keydown", (event) => {
+  const tag = (event.target.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "select" || tag === "textarea") return;
+  if (event.key === "f") fitView();
+  if (event.key === "r") resetView();
+});
+
+// Before/after stage toggle (only meaningful after alignment).
+$("btn-show-source").addEventListener("click", () => {
+  currentStage = "source";
+  // Back to the source topology: the `_tcp` links do not exist there, so
+  // leaving their groups in place would strand triads at a stale pose.
+  applySourceTopology();
+  requestPose();
+  log("showing source robot", "info");
+});
+
+$("btn-show-aligned").addEventListener("click", () => {
+  currentStage = "aligned";
+  if (alignedResult) applyAlignedTopology(alignedResult);
+  requestPose();
+  log("showing aligned robot", "info");
+});
+
+// Add chain
+$("add-chain").addEventListener("click", () => {
+  spec.chains.push([]);
+  spec.tcp.push(null);
+  onSpecChanged();
+  renderChains();
+  renderTcps();
+});
+
+// Add camera reference (prompts via the available links list).
+$("add-camera").addEventListener("click", () => {
+  const link = model.links[0] || "";
+  if (!link) { log("no links available", "warn"); return; }
+  spec.camera_references.push({ link });
+  onSpecChanged();
+  renderCameras();
+  log(`added camera reference: ${link}`, "info");
+});
+
+// Run alignment
+$("btn-run-align").addEventListener("click", () => {
+  const btn = $("btn-run-align");
+  btn.disabled = true;
+  const box = $("action-result");
+  box.innerHTML = "";
+  fetch("/api/align", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ spec }),
+  })
+    .then((r) => r.json())
+    .then((payload) => {
+      if (payload.error) {
+        const div = document.createElement("div");
+        div.className = "msg err";
+        div.textContent = payload.error;
+        box.appendChild(div);
+        log("alignment failed: " + payload.error, "err");
+        return;
+      }
+      alignedResult = payload;
+      clearStale();
+
+      // Alignment adds links the source never had -- the emitted `_tcp`
+      // frames and any camera-compat links. The groups were built from the
+      // source link list, so those poses had nowhere to land and their triads
+      // never drew. Rebuild against the aligned set before posing.
+      applyAlignedTopology(payload);
+
+      // Switch to the aligned view and show the toggle.
+      currentStage = "aligned";
+      $("stage-toggle-bar").style.display = "";
+      requestPose();
+
+      // Show verify result.
+      const verify = payload.verify;
+      const ok = verify.ok;
+      const summary =
+        `alignment ok=${ok} · ${payload.alignment.normalized_joints.length} ` +
+        `joint(s) normalized · checked ${verify.checked_configurations} configs`;
+      const div = document.createElement("div");
+      div.className = ok ? "msg ok" : "msg warn";
+      div.textContent = summary;
+      box.appendChild(div);
+      log(summary, ok ? "ok" : "warn");
+      for (const w of payload.alignment.warnings || []) log(w, "warn");
+
+      renderDeltaTable(payload.deltas);
+    })
+    .catch((error) => {
+      const div = document.createElement("div");
+      div.className = "msg err";
+      div.textContent = String(error);
+      box.appendChild(div);
+      log("alignment request failed: " + error, "err");
+    })
+    .finally(() => {
+      btn.disabled = false;
+    });
+});
+
+// Export config
+$("btn-export-config").addEventListener("click", () => {
+  const box = $("action-result");
+  box.innerHTML = "";
+  const name = $("export-name").value.trim() || null;
+  const configName = name ? name.replace(/\.urdf$/, "") + ".yaml" : null;
+  fetch("/api/export/config", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ spec, name: configName }),
+  })
+    .then((r) => r.json())
+    .then((payload) => {
+      const div = document.createElement("div");
+      if (payload.error) {
+        div.className = "msg err";
+        div.textContent = payload.error;
+        log("export config rejected: " + payload.error, "err");
+      } else {
+        div.className = "msg ok";
+        div.textContent = "config written: " + payload.config;
+        log("config exported: " + payload.config, "ok");
+      }
+      box.appendChild(div);
+    })
+    .catch((error) => {
+      const div = document.createElement("div");
+      div.className = "msg err";
+      div.textContent = String(error);
+      box.appendChild(div);
+      log("export config failed: " + error, "err");
+    });
+});
+
+// Export URDF
+$("btn-export-urdf").addEventListener("click", () => {
+  const box = $("action-result");
+  box.innerHTML = "";
+  const name = $("export-name").value.trim() || null;
+  fetch("/api/export/urdf", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ spec, name }),
+  })
+    .then((r) => r.json())
+    .then((payload) => {
+      const div = document.createElement("div");
+      if (payload.error) {
+        div.className = "msg err";
+        div.textContent = payload.error;
+        log("export URDF rejected: " + payload.error, "err");
+      } else {
+        div.className = "msg ok";
+        div.textContent =
+          `wrote ${payload.urdf} · ${payload.copied_meshes} mesh(es)` +
+          (payload.missing_meshes && payload.missing_meshes.length
+            ? ` · ${payload.missing_meshes.length} unresolved`
+            : "");
+        log(`exported ${payload.urdf}`, "ok");
+        if (payload.pruned_urdf) {
+          log(
+            `exported ${payload.pruned_urdf} ` +
+            `(${payload.pruned_links} link(s) kept, ` +
+            `${payload.dropped_links} dropped)`,
+            "ok"
+          );
+          // The only way to misuse the pruned file without anything
+          // appearing to fail: stale indices still move the robot, just
+          // not the joints the caller meant.
+          if (payload.pruned_renumbers) {
+            const n = (payload.dropped_movable_joints || []).length;
+            log(
+              `dropping ${n} movable joint(s) renumbers the joint vector — ` +
+              `index against the .pruned.inventory.json, not the full one`,
+              "warn"
+            );
+          }
+        }
+        for (const warning of payload.warnings || []) log(warning, "warn");
+        if (payload.missing_meshes && payload.missing_meshes.length) {
+          log(
+            `${payload.missing_meshes.length} mesh reference(s) left ` +
+            `unresolved in the export`,
+            "warn"
+          );
+        }
+      }
+      box.appendChild(div);
+    })
+    .catch((error) => {
+      const div = document.createElement("div");
+      div.className = "msg err";
+      div.textContent = String(error);
+      box.appendChild(div);
+      log("export URDF failed: " + error, "err");
+    });
+});
+
+// -------------------------------------------------------------- bootstrap
+
+fetch("/api/model")
+  .then((r) => r.json())
+  .then((payload) => {
+    model = payload;
+    spec = {
+      chains: payload.spec.chains || [],
+      tcp: payload.spec.tcp || [],
+      camera_references: payload.spec.camera_references || [],
+      rot_z: payload.spec.rot_z || {},
+    };
+    $("robot-name").textContent = payload.robot;
+    $("robot-path").textContent = payload.source_urdf;
+    $("output-root").textContent = "→ " + payload.output_root;
+    log(`loaded ${payload.robot} from ${payload.source_urdf}`, "ok");
+    for (const note of payload.notes || []) log(note, "info");
+    for (const warning of payload.warnings || []) log(warning, "warn");
+    buildLinkGroups();
+    renderWarnings();
+    renderDiagnostics();
+    renderChains();
+    renderTcps();
+    renderCameras();
+    updateYamlPreview();
+    renderJoints();
+    updateFrameCount();
+    loadMeshes();
+    requestPose();
+  })
+  .catch((error) => {
+    // A silent blank canvas is indistinguishable from a broken server, so
+    // say something in the page itself, not just the console.
+    $("robot-name").textContent = "failed to load";
+    $("robot-name").style.color = "var(--err)";
+    const box = $("model-warnings");
+    const div = document.createElement("div");
+    div.className = "msg err";
+    div.textContent =
+      "Could not load the robot: " + error +
+      ". See the Activity log below and the server output.";
+    box.appendChild(div);
+    log("model request failed: " + error, "err");
+    setStatus("load failed", "err");
+  });
+</script>
+</body>
+</html>

@@ -1,0 +1,23 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.ruff_cache/
+
+# Alignment output. Runs write here by default; results belong on shared
+# storage, not in the repository.
+workspace/
+
+# Vendored three.js, downloaded by scripts/fetch_vendor.py. Two addon loaders
+# import siblings by relative path and so land outside vendor/.
+src/uniurdf/gui/static/vendor/*.js
+src/uniurdf/gui/static/loaders/*.js
+src/uniurdf/gui/static/utils/*.js

@@ -1,0 +1,202 @@
+<?xml version="1.0"?>
+<!--
+  A small two-arm robot, built entirely from primitive geometry so it needs
+  no mesh files. It exists to demonstrate and test alignment, and every
+  feature it has is one alignment must handle:
+
+    * left_shoulder  rotates about +X: normalised by a 90 degree turn
+    * left_elbow     rotates about -Z: anti-parallel, the degenerate case
+                                       a naive axis-to-axis rotation gets
+                                       wrong
+    * right_shoulder rotates about +Y: normalised the other way
+    * right_elbow    rotates about +Z: already aligned, must not move
+    * right_finger   mimics right_elbow: a mimic joint survives alignment
+    * head_camera    is a fixed frame: preserved via camera_references
+    * both wrists    carry a visual with a non-zero origin, so the world-pose
+                     check has something to catch if a frame is mishandled
+
+  Dimensions are arbitrary; only the frames matter.
+-->
+<robot name="example_arm">
+
+  <!-- Base -->
+  <link name="base_link">
+    <visual>
+      <origin xyz="0 0 0.05" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.3 0.3 0.1"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <!-- Torso, fixed above the base -->
+  <link name="torso">
+    <visual>
+      <origin xyz="0 0 0.15" rpy="0 0 0"/>
+      <geometry>
+        <cylinder radius="0.08" length="0.3"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="torso_joint" type="fixed">
+    <parent link="base_link"/>
+    <child link="torso"/>
+    <origin xyz="0 0 0.1" rpy="0 0 0"/>
+  </joint>
+
+  <!-- Head, carrying a camera frame that must survive alignment -->
+  <link name="head">
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <sphere radius="0.07"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="head_joint" type="fixed">
+    <parent link="torso"/>
+    <child link="head"/>
+    <origin xyz="0 0 0.35" rpy="0 0 0"/>
+  </joint>
+
+  <link name="head_camera"/>
+
+  <joint name="head_camera_joint" type="fixed">
+    <parent link="head"/>
+    <child link="head_camera"/>
+    <origin xyz="0.06 0 0.02" rpy="0 -1.5707963267948966 0"/>
+  </joint>
+
+  <!-- ================= Left arm ================= -->
+
+  <!-- Axis +X: needs a 90 degree rotation to reach +Z -->
+  <link name="left_upper_arm">
+    <visual>
+      <origin xyz="0.1 0 0" rpy="0 1.5707963267948966 0"/>
+      <geometry>
+        <cylinder radius="0.03" length="0.2"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="left_shoulder" type="revolute">
+    <parent link="torso"/>
+    <child link="left_upper_arm"/>
+    <origin xyz="0 0.12 0.28" rpy="0 0 0"/>
+    <axis xyz="1 0 0"/>
+    <limit lower="-3.14" upper="3.14" effort="10" velocity="1.0"/>
+  </joint>
+
+  <!-- Axis -Z: anti-parallel to the target. The rotation taking -Z to +Z is
+       degenerate about the Z axis itself, so this is the case that catches a
+       naive cross-product implementation. -->
+  <link name="left_forearm">
+    <visual>
+      <origin xyz="0.1 0 0" rpy="0 1.5707963267948966 0"/>
+      <geometry>
+        <cylinder radius="0.025" length="0.2"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="left_elbow" type="revolute">
+    <parent link="left_upper_arm"/>
+    <child link="left_forearm"/>
+    <origin xyz="0.2 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 -1"/>
+    <limit lower="-2.5" upper="2.5" effort="10" velocity="1.0"/>
+  </joint>
+
+  <!-- Off-origin visual: its world pose is only preserved if the frame
+       change is compensated correctly. -->
+  <link name="left_wrist">
+    <visual>
+      <origin xyz="0.03 0.01 0" rpy="0 0 0.5"/>
+      <geometry>
+        <box size="0.06 0.04 0.04"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="left_wrist_joint" type="fixed">
+    <parent link="left_forearm"/>
+    <child link="left_wrist"/>
+    <origin xyz="0.2 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- ================= Right arm ================= -->
+
+  <!-- Axis +Y: normalised by a rotation about the other axis -->
+  <link name="right_upper_arm">
+    <visual>
+      <origin xyz="0.1 0 0" rpy="0 1.5707963267948966 0"/>
+      <geometry>
+        <cylinder radius="0.03" length="0.2"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="right_shoulder" type="revolute">
+    <parent link="torso"/>
+    <child link="right_upper_arm"/>
+    <origin xyz="0 -0.12 0.28" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="-3.14" upper="3.14" effort="10" velocity="1.0"/>
+  </joint>
+
+  <!-- Axis +Z already: alignment must leave this joint untouched -->
+  <link name="right_forearm">
+    <visual>
+      <origin xyz="0.1 0 0" rpy="0 1.5707963267948966 0"/>
+      <geometry>
+        <cylinder radius="0.025" length="0.2"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="right_elbow" type="revolute">
+    <parent link="right_upper_arm"/>
+    <child link="right_forearm"/>
+    <origin xyz="0.2 0 0" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.5" upper="2.5" effort="10" velocity="1.0"/>
+  </joint>
+
+  <link name="right_wrist">
+    <visual>
+      <origin xyz="0.03 -0.01 0" rpy="0 0 -0.5"/>
+      <geometry>
+        <box size="0.06 0.04 0.04"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="right_wrist_joint" type="fixed">
+    <parent link="right_forearm"/>
+    <child link="right_wrist"/>
+    <origin xyz="0.2 0 0" rpy="0 0 0"/>
+  </joint>
+
+  <!-- A gripper finger driven by the elbow. Mimic joints are actuated but
+       not independently commandable, and must survive alignment. -->
+  <link name="right_finger">
+    <visual>
+      <origin xyz="0 0 0.015" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.02 0.01 0.03"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="right_finger_joint" type="revolute">
+    <parent link="right_wrist"/>
+    <child link="right_finger"/>
+    <origin xyz="0.04 0 0" rpy="0 0 0"/>
+    <axis xyz="0 1 0"/>
+    <limit lower="0" upper="1.0" effort="5" velocity="1.0"/>
+    <mimic joint="right_elbow" multiplier="0.5" offset="0"/>
+  </joint>
+
+</robot>
